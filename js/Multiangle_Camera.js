@@ -138,6 +138,32 @@ const WIDGET_STYLES = `
     border-color: #64B4FF;
   }
   .synvow-multiangle-file-input { display: none; }
+  .synvow-multiangle-drop-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(233, 61, 130, 0.15);
+    border: 3px dashed #E93D82;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+    z-index: 100;
+  }
+  .synvow-multiangle-drop-overlay.active {
+    opacity: 1;
+  }
+  .synvow-multiangle-drop-text {
+    color: #E93D82;
+    font-size: 14px;
+    font-weight: 600;
+    text-shadow: 0 0 10px rgba(233, 61, 130, 0.5);
+  }
 `;
 
 function injectStyles() {
@@ -158,6 +184,7 @@ const translations = {
   zoomFull: 'ZOOM',
   resetToDefaults: 'Reset to defaults',
   loadImage: 'Load image',
+  dropImageHere: 'Drop image here',
   frontView: 'front view',
   frontRightQuarterView: 'front-right quarter view',
   rightSideView: 'right side view',
@@ -260,6 +287,9 @@ class CameraWidget {
     this.container.innerHTML = `
       <div class="synvow-multiangle-container">
         <div class="synvow-multiangle-canvas"></div>
+        <div class="synvow-multiangle-drop-overlay">
+          <span class="synvow-multiangle-drop-text">${t('dropImageHere')}</span>
+        </div>
         <div class="synvow-multiangle-prompt">&lt;sks&gt; front view eye-level shot medium shot</div>
         <div class="synvow-multiangle-dropdowns">
           <div class="synvow-multiangle-dropdown">
@@ -296,7 +326,9 @@ class CameraWidget {
     `;
     
     const containerEl = this.container.querySelector('.synvow-multiangle-container');
+    this.containerEl = containerEl;
     this.canvasContainer = containerEl.querySelector('.synvow-multiangle-canvas');
+    this.dropOverlay = containerEl.querySelector('.synvow-multiangle-drop-overlay');
     this.promptEl = containerEl.querySelector('.synvow-multiangle-prompt');
     this.hValueEl = containerEl.querySelector('.synvow-multiangle-param-value.azimuth');
     this.vValueEl = containerEl.querySelector('.synvow-multiangle-param-value.elevation');
@@ -554,7 +586,12 @@ class CameraWidget {
     }, { passive: false });
     
     canvas.addEventListener('touchend', () => this.onPointerUp());
-    canvas.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
+    
+    // Drag and drop events
+    this.containerEl.addEventListener('dragenter', (e) => this.onDragEnter(e));
+    this.containerEl.addEventListener('dragover', (e) => this.onDragOver(e));
+    this.containerEl.addEventListener('dragleave', (e) => this.onDragLeave(e));
+    this.containerEl.addEventListener('drop', (e) => this.onDrop(e));
     
     new ResizeObserver(() => this.onResize()).observe(this.canvasContainer);
   }
@@ -676,16 +713,88 @@ class CameraWidget {
     this.renderer.domElement.style.cursor = 'default';
   }
   
-  onWheel(event) {
+  onDragEnter(event) {
     event.preventDefault();
-    const sensitivity = 0.01;
-    let newDistance = this.liveDistance - event.deltaY * sensitivity;
-    newDistance = Math.max(0, Math.min(10, newDistance));
-    this.liveDistance = newDistance;
-    this.state.distance = Math.round(this.liveDistance * 10) / 10;
-    this.updateVisuals();
-    this.updateDisplay();
-    this.notifyStateChange();
+    event.stopPropagation();
+    if (this.hasImageFile(event)) {
+      this.dropOverlay.classList.add('active');
+    }
+  }
+  
+  onDragOver(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (this.hasImageFile(event)) {
+      event.dataTransfer.dropEffect = 'copy';
+    }
+  }
+  
+  onDragLeave(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    // Only hide overlay if leaving the container entirely
+    const rect = this.containerEl.getBoundingClientRect();
+    const x = event.clientX;
+    const y = event.clientY;
+    if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) {
+      this.dropOverlay.classList.remove('active');
+    }
+  }
+  
+  async onDrop(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    this.dropOverlay.classList.remove('active');
+    
+    const file = this.getImageFile(event);
+    if (file) {
+      await this.uploadFile(file);
+    }
+  }
+  
+  hasImageFile(event) {
+    if (event.dataTransfer?.types) {
+      for (const type of event.dataTransfer.types) {
+        if (type === 'Files') {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+  
+  getImageFile(event) {
+    const files = event.dataTransfer?.files;
+    if (files && files.length > 0) {
+      const file = files[0];
+      if (file.type.startsWith('image/')) {
+        return file;
+      }
+    }
+    return null;
+  }
+  
+  async uploadFile(file) {
+    try {
+      const formData = new FormData();
+      formData.append('image', file);
+      formData.append('overwrite', 'true');
+      
+      const response = await api.fetchApi('/upload/image', { method: 'POST', body: formData });
+      
+      if (response.ok) {
+        const result = await response.json();
+        const filename = result.name;
+        const subfolder = result.subfolder || '';
+        
+        this.state.uploadedImageFile = subfolder ? `${subfolder}/${filename}` : filename;
+        const imageUrl = api.apiURL(`/view?filename=${encodeURIComponent(filename)}&subfolder=${encodeURIComponent(subfolder)}&type=input`);
+        this.updateImage(imageUrl);
+        this.notifyStateChange();
+      }
+    } catch (error) {
+      console.error('Error uploading image:', error);
+    }
   }
   
   onResize() {
