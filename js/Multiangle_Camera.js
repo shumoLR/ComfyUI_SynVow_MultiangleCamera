@@ -785,10 +785,9 @@ class CameraWidget {
       if (response.ok) {
         const result = await response.json();
         const filename = result.name;
-        const subfolder = result.subfolder || '';
         
-        this.state.uploadedImageFile = subfolder ? `${subfolder}/${filename}` : filename;
-        const imageUrl = api.apiURL(`/view?filename=${encodeURIComponent(filename)}&subfolder=${encodeURIComponent(subfolder)}&type=input`);
+        this.state.uploadedImageFile = filename;
+        const imageUrl = api.apiURL(`/view?filename=${encodeURIComponent(filename)}&type=input`);
         this.updateImage(imageUrl);
         this.notifyStateChange();
       }
@@ -920,10 +919,9 @@ class CameraWidget {
       if (response.ok) {
         const result = await response.json();
         const filename = result.name;
-        const subfolder = result.subfolder || '';
         
-        this.state.uploadedImageFile = subfolder ? `${subfolder}/${filename}` : filename;
-        const imageUrl = api.apiURL(`/view?filename=${encodeURIComponent(filename)}&subfolder=${encodeURIComponent(subfolder)}&type=input`);
+        this.state.uploadedImageFile = filename;
+        const imageUrl = api.apiURL(`/view?filename=${encodeURIComponent(filename)}&type=input`);
         this.updateImage(imageUrl);
         this.notifyStateChange();
       }
@@ -1028,6 +1026,11 @@ class CameraWidget {
 const widgetInstances = new Map();
 
 function createCameraWidget(node) {
+  // Prevent duplicate widget creation
+  if (widgetInstances.has(node.id)) {
+    return;
+  }
+  
   const container = document.createElement('div');
   container.id = `synvow-multiangle-widget-${node.id}`;
   container.style.cssText = 'width:100%;height:100%;min-height:350px';
@@ -1049,7 +1052,12 @@ function createCameraWidget(node) {
     serialize: false
   });
   
-  const uploadedImageWidget = node.addWidget('hidden', 'uploaded_image', '', () => {});
+  // Find existing uploaded_image widget or create if not exists
+  let uploadedImageWidget = node.widgets?.find(w => w.name === 'uploaded_image');
+  if (!uploadedImageWidget) {
+    uploadedImageWidget = node.addWidget('hidden', 'uploaded_image', '', () => {});
+    uploadedImageWidget.serialize = true;
+  }
   
   setTimeout(() => {
     const cameraWidget = new CameraWidget({
@@ -1110,6 +1118,38 @@ app.registerExtension({
     const [oldWidth, oldHeight] = node.size;
     node.setSize([Math.max(oldWidth, 350), Math.max(oldHeight, 520)]);
     createCameraWidget(node);
+    
+    // Override configure to sync state after workflow load
+    const origConfigure = node.configure?.bind(node);
+    node.configure = function(info) {
+      if (origConfigure) origConfigure(info);
+      
+      // Sync camera widget state after configure (workflow load)
+      setTimeout(() => {
+        const cameraWidget = widgetInstances.get(node.id);
+        if (cameraWidget) {
+          const hWidget = node.widgets?.find(w => w.name === 'horizontal_angle');
+          const vWidget = node.widgets?.find(w => w.name === 'vertical_angle');
+          const zWidget = node.widgets?.find(w => w.name === 'zoom');
+          const uploadWidget = node.widgets?.find(w => w.name === 'uploaded_image');
+          
+          const newState = {};
+          if (hWidget) newState.azimuth = Number(hWidget.value);
+          if (vWidget) newState.elevation = Number(vWidget.value);
+          if (zWidget) newState.distance = Number(zWidget.value);
+          
+          cameraWidget.setState(newState);
+          
+          // Restore uploaded image if exists
+          if (uploadWidget?.value) {
+            const filename = uploadWidget.value;
+            const imageUrl = api.apiURL(`/view?filename=${encodeURIComponent(filename)}&type=input`);
+            cameraWidget.updateImage(imageUrl);
+            cameraWidget.state.uploadedImageFile = filename;
+          }
+        }
+      }, 150);
+    };
   }
 });
 
